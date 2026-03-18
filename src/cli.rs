@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "tack", version, about = "A tactile terminal task app")]
+#[command(name = "tck", version, about = "A tactile terminal task app")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -14,4 +14,3 @@ pub enum Commands {
     New { project_name: String },
     Open { path: PathBuf },
 }
-

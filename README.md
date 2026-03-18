@@ -1,11 +1,11 @@
-# tack
+# tck
 
-`tack` is a small Rust terminal task app built around fast capture. It uses a three-pane TUI: group boxes across the top, a centered composer in the middle, and the active group's task log at the bottom. State is persisted to a single JSON file and saved after each meaningful change.
+`tck` is a small Rust terminal task app built around fast capture. It uses a three-pane TUI: group boxes across the top, a centered composer in the middle, and the active group's task log at the bottom. State is persisted to a single JSON file and saved after each meaningful change.
 
 ## Features
 
-- `tack new <project-name>` creates `<project-name>.tack.json` and opens the TUI
-- `tack open <path>` loads an existing project file and opens the TUI
+- `tck new <project-name>` creates `<project-name>.tck.json` and opens the TUI
+- `tck open <path>` loads an existing project file and opens the TUI
 - default `Inbox` group for new projects
 - group selection, creation, and renaming
 - group deletion with confirmation
@@ -26,7 +26,7 @@ cargo run -- new demo
 To reopen an existing project:
 
 ```bash
-cargo run -- open demo.tack.json
+cargo run -- open demo.tck.json
 ```
 
 ## Controls

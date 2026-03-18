@@ -1,5 +1,5 @@
 [package]
-name = "tack"
+name = "tck"
 version = "0.1.0"
 edition = "2021"
 description = "A tactile terminal task app for fast capture and triage"

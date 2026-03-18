@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use crate::model::Project;
 
 pub fn default_project_path(project_name: &str) -> PathBuf {
-    PathBuf::from(format!("{project_name}.tack.json"))
+    PathBuf::from(format!("{project_name}.tck.json"))
 }
 
 pub fn load_project(path: &Path) -> Result<Project> {
@@ -26,4 +26,3 @@ pub fn save_project(path: &Path, project: &Project) -> Result<()> {
     let content = serde_json::to_string_pretty(project).context("failed to serialize project")?;
     fs::write(path, content).with_context(|| format!("failed to write {}", path.display()))
 }
-
