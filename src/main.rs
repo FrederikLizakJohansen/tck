@@ -4,6 +4,7 @@ mod cli;
 mod input;
 mod model;
 mod storage;
+mod theme;
 mod ui;
 
 use std::{io, path::PathBuf};
@@ -11,7 +12,7 @@ use std::{io, path::PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -49,7 +50,7 @@ fn canonicalize_project_path(path: PathBuf) -> Result<PathBuf> {
 fn run_tui(mut app: App) -> Result<()> {
     enable_raw_mode().context("failed to enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)
         .context("failed to enter alternate screen")?;
 
     let backend = CrosstermBackend::new(stdout);
@@ -76,7 +77,7 @@ fn run_event_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut *app))?;
         if app.should_quit {
             break;
         }

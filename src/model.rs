@@ -61,6 +61,8 @@ pub struct Project {
     pub groups: Vec<Group>,
     pub next_group_id: u64,
     pub next_task_id: u64,
+    #[serde(default)]
+    pub theme_index: usize,
 }
 
 impl Project {
@@ -70,6 +72,7 @@ impl Project {
             groups: Vec::new(),
             next_group_id: 1,
             next_task_id: 1,
+            theme_index: 0,
         };
         project.add_group("Inbox");
         project

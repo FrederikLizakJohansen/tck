@@ -11,7 +11,7 @@ use crate::{
     model::TaskStatus,
 };
 
-pub fn draw(frame: &mut Frame<'_>, app: &App) {
+pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(Color::Rgb(12, 14, 18))), area);
 
@@ -29,6 +29,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         ])
         .margin(1)
         .split(area);
+
+    app.groups_outer = layout[0];
+    app.composer_outer = layout[2];
+    app.tasks_outer = layout[4];
 
     draw_groups(frame, layout[0], app);
     draw_composer(frame, layout[2], app);
@@ -78,14 +82,15 @@ fn draw_groups(frame: &mut Frame<'_>, area: Rect, app: &App) {
     for (index, group) in app.project.groups.iter().enumerate().skip(start).take(end - start) {
         let selected = index == app.selected_group;
         let active = index == app.active_group;
+        let open_count = group.tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
         let mut style = Style::default()
             .fg(Color::Rgb(210, 216, 226))
             .bg(Color::Rgb(30, 35, 44));
 
         if active {
             style = style
-                .fg(Color::Rgb(16, 18, 22))
-                .bg(Color::Rgb(255, 214, 102))
+                .fg(app.theme().cursor_fg)
+                .bg(app.theme().accent)
                 .add_modifier(Modifier::BOLD);
         }
         if selected && app.focus == Pane::Groups {
@@ -95,10 +100,10 @@ fn draw_groups(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD);
         }
         if active && app.animations.group_flash.as_ref().is_some_and(|f| f.is_active()) {
-            style = style.bg(Color::Rgb(255, 232, 148));
+            style = style.bg(app.theme().accent_muted);
         }
 
-        spans.push(Span::styled(format!(" {} ", group.name), style));
+        spans.push(Span::styled(format!(" {} [{}] ", group.name, open_count), style));
         spans.push(Span::raw(" "));
     }
     spans.push(Span::raw(" "));
@@ -117,7 +122,7 @@ fn draw_groups(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::styled(
             if show_left { "←" } else { " " },
-            Style::default().fg(Color::Rgb(112, 125, 148)),
+            Style::default().fg(app.theme().accent),
         )),
         Rect {
             x: row_area.x,
@@ -133,7 +138,7 @@ fn draw_groups(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         Paragraph::new(Line::styled(
             if show_right { "→" } else { " " },
-            Style::default().fg(Color::Rgb(112, 125, 148)),
+            Style::default().fg(app.theme().accent),
         ))
         .alignment(Alignment::Right),
         Rect {
@@ -213,137 +218,156 @@ fn draw_composer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn draw_tasks(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn draw_tasks(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     let block = pane_block("Tasks", app.focus == Pane::Tasks, app);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows = app
-        .project
-        .groups
-        .get(app.active_group)
-        .map(|group| {
-            group
-                .tasks
-                .iter()
-                .enumerate()
-                .map(|(index, task)| {
-                    let is_selected = index == app.selected_task && app.focus == Pane::Tasks;
-                    let mut style = match task.status {
-                        TaskStatus::Open => Style::default().fg(Color::Rgb(230, 234, 240)),
-                        TaskStatus::Closed => Style::default()
-                            .fg(Color::Rgb(120, 131, 147))
-                            .add_modifier(Modifier::CROSSED_OUT),
-                    };
-
-                    if is_selected {
-                        style = style.bg(Color::Rgb(44, 52, 70));
-                    }
-
-                    let animated = app.recent_task_index == Some(index);
-                    if animated {
-                        if let Some(flash) = &app.animations.task_flash {
-                            if flash.is_active() {
-                                style = style.bg(match app.recent_task_motion {
-                                    Some(TaskMotion::Added) => Color::Rgb(34, 67, 64),
-                                    Some(TaskMotion::Closed) => Color::Rgb(76, 46, 46),
-                                    Some(TaskMotion::Reopened) => Color::Rgb(48, 72, 52),
-                                    None => Color::Rgb(44, 52, 70),
-                                });
-                            }
-                        }
-                    }
-
-                    let marker = match (task.status, animated, app.recent_task_motion) {
-                        (TaskStatus::Open, true, Some(TaskMotion::Added)) => "✦",
-                        (TaskStatus::Open, true, Some(TaskMotion::Reopened)) => "↺",
-                        (TaskStatus::Open, _, _) => "•",
-                        (TaskStatus::Closed, true, Some(TaskMotion::Closed)) => "◆",
-                        (TaskStatus::Closed, _, _) => "×",
-                    };
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{marker} "),
-                            style.fg(match task.status {
-                                TaskStatus::Open => Color::Rgb(122, 211, 164),
-                                TaskStatus::Closed => Color::Rgb(150, 115, 115),
-                            }),
-                        ),
-                        Span::styled(task.text.as_str(), style),
-                    ])
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let content = if rows.is_empty() {
-        Text::from(Line::styled(
-            "No tasks yet. Use the capture pane to create one.",
-            Style::default().fg(Color::Rgb(108, 122, 145)),
-        ))
-    } else {
-        let viewport_height = inner.height as usize;
-        let top = visible_vertical_window(app.selected_task, rows.len(), viewport_height);
-        let bottom = (top + viewport_height).min(rows.len());
-        let mut all_lines = Vec::with_capacity(bottom - top);
-        all_lines.extend(rows.iter().skip(top).take(bottom - top).cloned());
-        Text::from(all_lines)
+    let tasks = match app.project.groups.get(app.active_group) {
+        Some(group) => &group.tasks,
+        None => return,
     };
 
-    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner);
-    if !rows.is_empty() {
-        let viewport_height = inner.height as usize;
-        let top = visible_vertical_window(app.selected_task, rows.len(), viewport_height);
-        let bottom = (top + viewport_height).min(rows.len());
-        let show_up = top > 0;
-        let show_down = bottom < rows.len();
-
+    if tasks.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::styled(
-                if show_up { "↑" } else { " " },
-                Style::default().fg(Color::Rgb(112, 125, 148)),
+                "No tasks yet. Use the capture pane to create one.",
+                Style::default().fg(Color::Rgb(108, 122, 145)),
             )),
-            Rect {
-                x: inner.x + inner.width.saturating_sub(2),
-                y: inner.y,
-                width: 1,
-                height: 1,
-            },
+            inner,
         );
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                if show_down { "↓" } else { " " },
-                Style::default().fg(Color::Rgb(112, 125, 148)),
-            )),
-            Rect {
-                x: inner.x + inner.width.saturating_sub(2),
-                y: inner.y + inner.height.saturating_sub(1),
-                width: 1,
-                height: 1,
-            },
-        );
+        return;
     }
+
+    // 2 cols for "• " prefix, 2 cols margin for the scroll indicator on the right
+    let text_width = inner.width.saturating_sub(4).max(1) as usize;
+    let viewport_height = inner.height as usize;
+    let mut all_lines: Vec<Line<'static>> = Vec::new();
+    let mut task_visual_starts: Vec<usize> = Vec::new();
+
+    for (index, task) in tasks.iter().enumerate() {
+        if index > 0 {
+            all_lines.push(Line::default());
+        }
+        task_visual_starts.push(all_lines.len());
+
+        let is_selected = index == app.selected_task && app.focus == Pane::Tasks;
+        let animated = app.recent_task_index == Some(index);
+        let mut style = match task.status {
+            TaskStatus::Open => Style::default().fg(Color::Rgb(230, 234, 240)),
+            TaskStatus::Closed => Style::default()
+                .fg(Color::Rgb(120, 131, 147))
+                .add_modifier(Modifier::CROSSED_OUT),
+        };
+        if is_selected {
+            style = style.bg(Color::Rgb(44, 52, 70));
+        }
+        if animated {
+            if let Some(flash) = &app.animations.task_flash {
+                if flash.is_active() {
+                    style = style.bg(match app.recent_task_motion {
+                        Some(TaskMotion::Added) => app.theme().bg_flash_added,
+                        Some(TaskMotion::Closed) => app.theme().bg_flash_closed,
+                        Some(TaskMotion::Reopened) => app.theme().bg_flash_reopened,
+                        None => Color::Rgb(44, 52, 70),
+                    });
+                }
+            }
+        }
+
+        let marker = match (task.status, animated, app.recent_task_motion) {
+            (TaskStatus::Open, true, Some(TaskMotion::Added)) => "✦",
+            (TaskStatus::Open, true, Some(TaskMotion::Reopened)) => "↺",
+            (TaskStatus::Open, _, _) => "•",
+            (TaskStatus::Closed, true, Some(TaskMotion::Closed)) => "◆",
+            (TaskStatus::Closed, _, _) => "×",
+        };
+        let marker_color = match task.status {
+            TaskStatus::Open => app.theme().marker_open,
+            TaskStatus::Closed => app.theme().marker_closed,
+        };
+
+        let wrapped = wrap_text(&task.text, text_width);
+        for (wrap_idx, part) in wrapped.into_iter().enumerate() {
+            let line = if wrap_idx == 0 {
+                Line::from(vec![
+                    Span::styled(format!("{marker} "), style.fg(marker_color)),
+                    Span::styled(part, style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("  ", style),
+                    Span::styled(part, style),
+                ])
+            };
+            all_lines.push(line);
+        }
+    }
+
+    let selected_visual = task_visual_starts.get(app.selected_task).copied().unwrap_or(0);
+    let top = visible_vertical_window(selected_visual, all_lines.len(), viewport_height);
+    let bottom = (top + viewport_height).min(all_lines.len());
+
+    app.tasks_inner = inner;
+    app.tasks_scroll_top = top;
+    app.total_task_visual_rows = all_lines.len();
+    app.task_visual_starts = task_visual_starts;
+
+    let visible: Vec<Line<'static>> = all_lines[top..bottom].to_vec();
+    frame.render_widget(Paragraph::new(Text::from(visible)), inner);
+
+    let show_up = top > 0;
+    let show_down = bottom < all_lines.len();
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            if show_up { "↑" } else { " " },
+            Style::default().fg(Color::Rgb(112, 125, 148)),
+        )),
+        Rect {
+            x: inner.x + inner.width.saturating_sub(2),
+            y: inner.y,
+            width: 1,
+            height: 1,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            if show_down { "↓" } else { " " },
+            Style::default().fg(Color::Rgb(112, 125, 148)),
+        )),
+        Rect {
+            x: inner.x + inner.width.saturating_sub(2),
+            y: inner.y + inner.height.saturating_sub(1),
+            width: 1,
+            height: 1,
+        },
+    );
 }
 
 fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let status_color = if app.animations.status_flash.as_ref().is_some_and(|f| f.is_active()) {
-        Color::Rgb(255, 214, 102)
+        app.theme().accent
     } else {
         Color::Rgb(144, 154, 171)
     };
 
+    let key = |s: &'static str| Span::styled(s, Style::default().fg(app.theme().accent));
     let footer = Line::from(vec![
-        Span::styled("Arrows", Style::default().fg(Color::Rgb(255, 214, 102))),
+        key("Arrows"),
         Span::raw(" move/focus  "),
-        Span::styled("Enter", Style::default().fg(Color::Rgb(255, 214, 102))),
+        key("Enter"),
         Span::raw(" start/save/toggle  "),
-        Span::styled("1/2/3", Style::default().fg(Color::Rgb(255, 214, 102))),
+        key("1/2/3"),
         Span::raw(" jump panes  "),
-        Span::styled("n/r/x/d", Style::default().fg(Color::Rgb(255, 214, 102))),
+        key("n/r/x/d"),
         Span::raw(" group actions  "),
-        Span::styled("e/c/x/o", Style::default().fg(Color::Rgb(255, 214, 102))),
+        key("e/c/x/o"),
         Span::raw(" edit/copy/close/reopen  "),
-        Span::styled("q", Style::default().fg(Color::Rgb(255, 214, 102))),
+        key("u"),
+        Span::raw(" undo  "),
+        key("t"),
+        Span::raw(" theme  "),
+        key("q"),
         Span::raw(" quit  "),
         Span::styled(
             format!("| {}", app.status),
@@ -507,10 +531,10 @@ fn draw_delete_group_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
 fn pane_block(title: &str, focused: bool, app: &App) -> Block<'static> {
     let mut color = Color::Rgb(72, 86, 108);
     if focused {
-        color = Color::Rgb(255, 214, 102);
+        color = app.theme().accent;
     }
     if focused && app.animations.focus_flash.as_ref().is_some_and(|f| f.is_active()) {
-        color = Color::Rgb(255, 236, 161);
+        color = app.theme().accent_flash;
     }
 
     Block::default()
@@ -547,7 +571,7 @@ fn input_line(
             if show_left { "← " } else { "  " },
             Style::default().fg(Color::Rgb(112, 125, 148)),
         ),
-        Span::styled("> ", Style::default().fg(Color::Rgb(255, 214, 102))),
+        Span::styled("> ", Style::default().fg(app.theme().accent)),
         Span::styled(left, Style::default().fg(Color::Rgb(245, 247, 250))),
     ];
 
@@ -556,8 +580,8 @@ fn input_line(
             current_char.to_string(),
             if show_cursor && app.animations.cursor_visible() {
                 Style::default()
-                    .fg(Color::Rgb(18, 20, 26))
-                    .bg(Color::Rgb(255, 214, 102))
+                    .fg(app.theme().cursor_fg)
+                    .bg(app.theme().accent)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Rgb(245, 247, 250))
@@ -575,9 +599,7 @@ fn input_line(
             } else {
                 " "
             },
-            Style::default()
-                .fg(Color::Rgb(255, 214, 102))
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(app.theme().accent).add_modifier(Modifier::BOLD),
         ));
     }
 
@@ -589,16 +611,14 @@ fn input_line(
     if text.is_empty() {
         spans = vec![
             Span::raw("  "),
-            Span::styled("> ", Style::default().fg(Color::Rgb(255, 214, 102))),
+            Span::styled("> ", Style::default().fg(app.theme().accent)),
             Span::styled(
                 if show_cursor && app.animations.cursor_visible() {
                     "█"
                 } else {
                     " "
                 },
-                Style::default()
-                    .fg(Color::Rgb(255, 214, 102))
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(app.theme().accent).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
         ];
@@ -649,7 +669,7 @@ fn editor_lines(
         let mut spans = vec![
             Span::styled(
                 if current { ">" } else { " " },
-                Style::default().fg(Color::Rgb(255, 214, 102)),
+                Style::default().fg(app.theme().accent),
             ),
             Span::raw(" "),
             Span::styled(left, Style::default().fg(Color::Rgb(245, 247, 250))),
@@ -661,8 +681,8 @@ fn editor_lines(
                     current_char.to_string(),
                     if show_cursor && app.animations.cursor_visible() {
                         Style::default()
-                            .fg(Color::Rgb(18, 20, 26))
-                            .bg(Color::Rgb(255, 214, 102))
+                            .fg(app.theme().cursor_fg)
+                            .bg(app.theme().accent)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::Rgb(245, 247, 250))
@@ -680,9 +700,7 @@ fn editor_lines(
                     } else {
                         " "
                     },
-                    Style::default()
-                        .fg(Color::Rgb(255, 214, 102))
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(app.theme().accent).add_modifier(Modifier::BOLD),
                 ));
             }
         } else {
@@ -697,16 +715,14 @@ fn editor_lines(
 
     if rendered.is_empty() {
         rendered.push(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Rgb(255, 214, 102))),
+            Span::styled("> ", Style::default().fg(app.theme().accent)),
             Span::styled(
                 if show_cursor && app.animations.cursor_visible() {
                     "█"
                 } else {
                     " "
                 },
-                Style::default()
-                    .fg(Color::Rgb(255, 214, 102))
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(app.theme().accent).add_modifier(Modifier::BOLD),
             ),
         ]));
     }
@@ -723,7 +739,11 @@ fn visible_group_window(app: &App, width: usize) -> (usize, usize, bool, bool) {
         .project
         .groups
         .iter()
-        .map(|group| group.name.chars().count() + 3)
+        .map(|group| {
+            let open = group.tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
+            // " name [n] " + 1 separator space
+            group.name.chars().count() + format!(" [{}] ", open).len() + 1
+        })
         .collect::<Vec<_>>();
 
     let mut start = app.selected_group.min(group_widths.len().saturating_sub(1));
@@ -748,6 +768,63 @@ fn visible_group_window(app: &App, width: usize) -> (usize, usize, bool, bool) {
     }
 
     (start, end, start > 0, end < group_widths.len())
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len: usize = 0;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if current_len == 0 {
+            if word_len <= width {
+                current.push_str(word);
+                current_len = word_len;
+            } else {
+                for ch in word.chars() {
+                    current.push(ch);
+                    current_len += 1;
+                    if current_len == width {
+                        lines.push(std::mem::take(&mut current));
+                        current_len = 0;
+                    }
+                }
+            }
+        } else if current_len + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current_len = 0;
+            if word_len <= width {
+                current.push_str(word);
+                current_len = word_len;
+            } else {
+                for ch in word.chars() {
+                    current.push(ch);
+                    current_len += 1;
+                    if current_len == width {
+                        lines.push(std::mem::take(&mut current));
+                        current_len = 0;
+                    }
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn visible_vertical_window(selected: usize, total: usize, viewport: usize) -> usize {

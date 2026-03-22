@@ -2,12 +2,17 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use arboard::Clipboard;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::layout::Rect;
 
 use crate::{
     anim::Animations,
     model::{Project, TaskStatus},
     storage,
+    theme::{Theme, THEMES},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,10 +57,21 @@ pub struct App {
     pub animations: Animations,
     pub recent_task_index: Option<usize>,
     pub recent_task_motion: Option<TaskMotion>,
+    pub theme_index: usize,
+    pub undo_snapshot: Option<Project>,
+    // Updated each frame by draw(); used by mouse handler.
+    pub groups_outer: Rect,
+    pub composer_outer: Rect,
+    pub tasks_outer: Rect,
+    pub tasks_inner: Rect,
+    pub tasks_scroll_top: usize,
+    pub task_visual_starts: Vec<usize>,
+    pub total_task_visual_rows: usize,
 }
 
 impl App {
     pub fn new(project: Project, project_path: PathBuf) -> Self {
+        let theme_index = project.theme_index;
         Self {
             project,
             project_path,
@@ -73,11 +89,111 @@ impl App {
             animations: Animations::new(),
             recent_task_index: None,
             recent_task_motion: None,
+            theme_index,
+            undo_snapshot: None,
+            groups_outer: Rect::default(),
+            composer_outer: Rect::default(),
+            tasks_outer: Rect::default(),
+            tasks_inner: Rect::default(),
+            tasks_scroll_top: 0,
+            task_visual_starts: Vec::new(),
+            total_task_visual_rows: 0,
         }
     }
 
     pub fn tick(&mut self) {
         self.animations.tick();
+    }
+
+    pub fn theme(&self) -> &'static Theme {
+        &THEMES[self.theme_index]
+    }
+
+    fn cycle_theme(&mut self) {
+        self.theme_index = (self.theme_index + 1) % THEMES.len();
+        self.project.theme_index = self.theme_index;
+        self.set_status(format!("Theme: {}", self.theme().name));
+        self.persist().ok();
+    }
+
+    fn take_undo_snapshot(&mut self) {
+        self.undo_snapshot = Some(self.project.clone());
+    }
+
+    fn undo(&mut self) -> Result<()> {
+        if let Some(snapshot) = self.undo_snapshot.take() {
+            self.project = snapshot;
+            self.active_group =
+                self.active_group.min(self.project.groups.len().saturating_sub(1));
+            self.selected_group =
+                self.selected_group.min(self.project.groups.len().saturating_sub(1));
+            let task_count = self
+                .project
+                .groups
+                .get(self.active_group)
+                .map(|g| g.tasks.len())
+                .unwrap_or(0);
+            self.selected_task = self.selected_task.min(task_count.saturating_sub(1));
+            self.recent_task_index = None;
+            self.set_status("Undone");
+            self.persist()
+        } else {
+            self.invalid("Nothing to undo");
+            Ok(())
+        }
+    }
+
+    pub fn on_mouse(&mut self, event: MouseEvent) -> Result<()> {
+        let x = event.column;
+        let y = event.row;
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if rect_contains(self.tasks_outer, x, y) {
+                    self.set_focus(Pane::Tasks);
+                    let inner = self.tasks_inner;
+                    if y >= inner.y && x >= inner.x && x < inner.x + inner.width {
+                        let visual_row =
+                            (y - inner.y) as usize + self.tasks_scroll_top;
+                        let idx = self
+                            .task_visual_starts
+                            .partition_point(|&s| s <= visual_row);
+                        if idx > 0 {
+                            let task_idx = idx - 1;
+                            let task_count = self
+                                .project
+                                .groups
+                                .get(self.active_group)
+                                .map(|g| g.tasks.len())
+                                .unwrap_or(0);
+                            if task_idx < task_count {
+                                self.selected_task = task_idx;
+                            }
+                        }
+                    }
+                } else if rect_contains(self.groups_outer, x, y) {
+                    self.set_focus(Pane::Groups);
+                } else if rect_contains(self.composer_outer, x, y) {
+                    self.set_focus(Pane::Composer);
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if rect_contains(self.tasks_outer, x, y) {
+                    self.navigate_down_tasks();
+                } else if rect_contains(self.groups_outer, x, y) {
+                    let last = self.project.groups.len().saturating_sub(1);
+                    self.selected_group = (self.selected_group + 1).min(last);
+                }
+            }
+            MouseEventKind::ScrollUp => {
+                if rect_contains(self.tasks_outer, x, y) {
+                    self.navigate_up_tasks();
+                } else if rect_contains(self.groups_outer, x, y) {
+                    self.selected_group = self.selected_group.saturating_sub(1);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn current_group_task_count(&self) -> usize {
@@ -92,6 +208,7 @@ impl App {
         match event {
             Event::Key(key) => self.on_key(key),
             Event::Paste(text) => self.on_paste(text),
+            Event::Mouse(mouse) => self.on_mouse(mouse),
             _ => Ok(()),
         }
     }
@@ -119,6 +236,8 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('d') => self.begin_clear_closed(),
+            KeyCode::Char('u') => self.undo()?,
+            KeyCode::Char('t') => self.cycle_theme(),
             KeyCode::Char('1') => self.set_focus(Pane::Groups),
             KeyCode::Char('2') => self.set_focus(Pane::Composer),
             KeyCode::Char('3') => self.set_focus(Pane::Tasks),
@@ -324,6 +443,7 @@ impl App {
     }
 
     fn submit_task(&mut self) -> Result<()> {
+        self.take_undo_snapshot();
         let text = self.composer.trim();
         if text.is_empty() {
             self.invalid("Task cannot be empty");
@@ -393,6 +513,7 @@ impl App {
     }
 
     fn commit_task_edit(&mut self) -> Result<()> {
+        self.take_undo_snapshot();
         let text = self.composer.trim();
         if text.is_empty() {
             self.invalid("Task cannot be empty");
@@ -438,6 +559,7 @@ impl App {
     }
 
     fn clear_closed_tasks(&mut self) -> Result<()> {
+        self.take_undo_snapshot();
         let Some(group) = self.project.groups.get_mut(self.active_group) else {
             self.invalid("No active group");
             return Ok(());
@@ -462,6 +584,7 @@ impl App {
     }
 
     fn delete_group(&mut self) -> Result<()> {
+        self.take_undo_snapshot();
         if self.project.groups.len() <= 1 {
             self.invalid("Cannot delete the last group");
             self.mode = Mode::Normal;
@@ -481,6 +604,7 @@ impl App {
     }
 
     fn close_task(&mut self) -> Result<()> {
+        self.take_undo_snapshot();
         let Some(group) = self.project.groups.get_mut(self.active_group) else {
             self.invalid("No active group");
             return Ok(());
@@ -505,6 +629,7 @@ impl App {
     }
 
     fn reopen_task(&mut self) -> Result<()> {
+        self.take_undo_snapshot();
         let Some(group) = self.project.groups.get_mut(self.active_group) else {
             self.invalid("No active group");
             return Ok(());
@@ -556,15 +681,20 @@ impl App {
                 self.focus = Pane::Tasks;
                 self.animations.pulse_focus();
             }
-            Pane::Tasks => {
-                let count = self.current_group_task_count();
-                if count == 0 {
-                    return;
-                }
-                let last = count.saturating_sub(1);
-                self.selected_task = (self.selected_task + 1).min(last);
-            }
+            Pane::Tasks => self.navigate_down_tasks(),
         }
+    }
+
+    fn navigate_down_tasks(&mut self) {
+        let count = self.current_group_task_count();
+        if count == 0 {
+            return;
+        }
+        self.selected_task = (self.selected_task + 1).min(count.saturating_sub(1));
+    }
+
+    fn navigate_up_tasks(&mut self) {
+        self.selected_task = self.selected_task.saturating_sub(1);
     }
 
     fn navigate_left(&mut self) {
@@ -738,19 +868,21 @@ impl App {
 
     fn on_paste(&mut self, text: String) -> Result<()> {
         match self.mode {
-            Mode::EditingCapture => {
+            Mode::EditingCapture | Mode::EditingTask => {
                 for ch in text.chars() {
-                    self.insert_composer_char(ch);
-                }
-            }
-            Mode::EditingTask => {
-                for ch in text.chars() {
-                    self.insert_composer_char(ch);
+                    match ch {
+                        '\r' => {}
+                        '\n' => self.insert_composer_char(' '),
+                        ch if ch.is_control() => {}
+                        ch => self.insert_composer_char(ch),
+                    }
                 }
             }
             Mode::CreatingGroup | Mode::RenamingGroup => {
                 for ch in text.chars() {
-                    self.insert_group_input_char(ch);
+                    if !ch.is_control() {
+                        self.insert_group_input_char(ch);
+                    }
                 }
             }
             Mode::Normal | Mode::ConfirmClearClosed | Mode::ConfirmDeleteGroup => {}
@@ -807,6 +939,10 @@ impl App {
         self.group_input.drain(self.group_input_cursor..next);
         self.animations.note_cursor_activity();
     }
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
 fn prev_boundary(text: &str, cursor: usize) -> usize {
